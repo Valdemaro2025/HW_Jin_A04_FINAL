@@ -184,8 +184,27 @@ function asIndex(basketsOrIndex) {
  * @returns {number} count(A) for a single-element `stocks`, count(A union B) for two.
  */
 function countItemset(basketsOrIndex, stocks) {
-  // TODO(hw4): intersect the posting lists and return the number of baskets.
-  throw new Error("TODO(hw4): countItemset is not implemented yet.");
+  const index = asIndex(basketsOrIndex);
+  if (!stocks || stocks.length === 0) return 0;
+  const unique = [...new Set(stocks.map(stockOf))];
+  if (unique.length === 0) return 0;
+  const postings = [];
+  for (const stock of unique) {
+    const posting = index.byStock.get(stock);
+    if (!posting) return 0;
+    postings.push(posting);
+  }
+  postings.sort((a, b) => a.size - b.size);
+  if (postings.length === 1) return postings[0].size;
+  const smallest = postings[0];
+  let count = 0;
+  outer: for (const basketId of smallest) {
+    for (let i = 1; i < postings.length; i++) {
+      if (!postings[i].has(basketId)) continue outer;
+    }
+    count++;
+  }
+  return count;
 }
 
 /**
@@ -228,8 +247,16 @@ function countPair(basketsOrIndex, stockA, stockB) {
  * @returns {Array<string>} unique stock codes, in first-appearance order.
  */
 function dedupeBasket(rawItems) {
-  // TODO(hw4): return the unique stock codes in first-appearance order.
-  throw new Error("TODO(hw4): dedupeBasket is not implemented yet.");
+  const seen = new Set();
+  const result = [];
+  for (const item of rawItems || []) {
+    const stock = stockOf(item);
+    if (!seen.has(stock)) {
+      seen.add(stock);
+      result.push(stock);
+    }
+  }
+  return result;
 }
 
 /**
@@ -246,8 +273,8 @@ function dedupeBasket(rawItems) {
  * @returns {{value: number, defined: boolean}} `defined` is false when `n === 0`.
  */
 function computeSupport(jointCount, n) {
-  // TODO(hw4): support = jointCount / n, undefined when n === 0.
-  throw new Error("TODO(hw4): computeSupport is not implemented yet.");
+  if (n === 0) return { value: 0, defined: false };
+  return { value: jointCount / n, defined: true };
 }
 
 /**
@@ -265,8 +292,8 @@ function computeSupport(jointCount, n) {
  * @returns {{value: number, defined: boolean}}
  */
 function computeConfidence(jointCount, antecedentCount) {
-  // TODO(hw4): confidence = jointCount / antecedentCount, undefined when count(A) === 0.
-  throw new Error("TODO(hw4): computeConfidence is not implemented yet.");
+  if (antecedentCount === 0) return { value: 0, defined: false };
+  return { value: jointCount / antecedentCount, defined: true };
 }
 
 /**
@@ -287,8 +314,11 @@ function computeConfidence(jointCount, antecedentCount) {
  * @returns {{value: number, defined: boolean}}
  */
 function computeLift(confidence, consequentCount, n) {
-  // TODO(hw4): lift = confidence / (consequentCount / n), guarded.
-  throw new Error("TODO(hw4): computeLift is not implemented yet.");
+  if (!confidence || confidence.defined !== true) return { value: 0, defined: false };
+  if (n === 0) return { value: 0, defined: false };
+  const baseline = consequentCount / n;
+  if (baseline === 0) return { value: 0, defined: false };
+  return { value: confidence.value / baseline, defined: true };
 }
 
 /**
@@ -333,8 +363,95 @@ function validateThresholds(minSupport, minConfidence) {
  * @returns {Array<{items: string[], count: number, support: number}>} frequent itemsets
  */
 function findFrequentItemsets(transactions, minSupport) {
-  // TODO(hw4): implement Apriori (or an equivalent frequent-itemset miner).
-  throw new Error("TODO(hw4): findFrequentItemsets is not implemented yet.");
+  const index = asIndex(transactions);
+  const n = index.n;
+  if (n === 0) return [];
+  const keyOf = (items) => items.join("\u0000");
+  const countViaIndex = (items) => {
+    const postings = [];
+    for (const stock of items) {
+      const posting = index.byStock.get(stock);
+      if (!posting) return 0;
+      postings.push(posting);
+    }
+    postings.sort((a, b) => a.size - b.size);
+    if (postings.length === 1) return postings[0].size;
+    let count = 0;
+    outer: for (const basketId of postings[0]) {
+      for (let i = 1; i < postings.length; i++) {
+        if (!postings[i].has(basketId)) continue outer;
+      }
+      count++;
+    }
+    return count;
+  };
+
+  // L1: frequent singletons, canonical (sorted) order for deterministic joins.
+  const l1Stocks = [...index.byStock.keys()].sort();
+  let prevLevel = [];
+  const result = [];
+  const frequentKeys = new Set();
+  for (const stock of l1Stocks) {
+    const count = countViaIndex([stock]);
+    const support = count / n;
+    if (support >= minSupport) {
+      const entry = { items: [stock], count, support };
+      prevLevel.push(entry);
+      result.push(entry);
+      frequentKeys.add(keyOf(entry.items));
+    }
+  }
+
+  // Level-wise Apriori joins with downward-closure pruning.
+  let k = 2;
+  while (prevLevel.length > 0) {
+    const prevKeys = new Set(prevLevel.map((entry) => keyOf(entry.items)));
+    const candidates = new Map();
+    for (let i = 0; i < prevLevel.length; i++) {
+      for (let j = i + 1; j < prevLevel.length; j++) {
+        const a = prevLevel[i].items;
+        const b = prevLevel[j].items;
+        let joinable = true;
+        for (let t = 0; t < k - 2; t++) {
+          if (a[t] !== b[t]) {
+            joinable = false;
+            break;
+          }
+        }
+        if (!joinable) continue;
+        const merged = [...new Set([...a, ...b])].sort();
+        if (merged.length !== k) continue;
+        const key = keyOf(merged);
+        if (candidates.has(key) || frequentKeys.has(key)) continue;
+        // Downward closure: every (k-1)-subset must be frequent.
+        let allSubsetsFrequent = true;
+        for (let s = 0; s < merged.length; s++) {
+          const subset = [...merged.slice(0, s), ...merged.slice(s + 1)];
+          if (!prevKeys.has(keyOf(subset))) {
+            allSubsetsFrequent = false;
+            break;
+          }
+        }
+        if (!allSubsetsFrequent) continue;
+        candidates.set(key, merged);
+      }
+    }
+    if (candidates.size === 0) break;
+    const nextLevel = [];
+    for (const merged of candidates.values()) {
+      const count = countViaIndex(merged);
+      const support = count / n;
+      if (support >= minSupport) {
+        const entry = { items: merged, count, support };
+        nextLevel.push(entry);
+        result.push(entry);
+        frequentKeys.add(keyOf(merged));
+      }
+    }
+    prevLevel = nextLevel;
+    k++;
+  }
+  return result;
 }
 
 /**
@@ -360,9 +477,65 @@ function findFrequentItemsets(transactions, minSupport) {
  * @returns {Rule[]}
  */
 function generateRules(frequentItemsets, minConfidence) {
-  // TODO(hw4): generate candidate rules from each frequent itemset, compute
-  // confidence in both directions, then keep the rules that pass the threshold.
-  throw new Error("TODO(hw4): generateRules is not implemented yet.");
+  const keyOf = (items) => [...items].map(stockOf).sort().join("\u0000");
+  const countByKey = new Map();
+  for (const entry of frequentItemsets || []) {
+    const key = keyOf(entry.items);
+    if (!countByKey.has(key)) {
+      countByKey.set(key, { items: [...entry.items].map(stockOf).sort(), count: entry.count, support: entry.support });
+    }
+  }
+  // Recover N from count/support so lift can be filled in when possible.
+  let n = 0;
+  for (const entry of countByKey.values()) {
+    if (entry.support > 0) {
+      n = Math.round(entry.count / entry.support);
+      break;
+    }
+  }
+
+  const rules = [];
+  const seenRules = new Set();
+  for (const entry of countByKey.values()) {
+    const items = entry.items;
+    if (items.length < 2) continue;
+    const m = items.length;
+    // Enumerate every non-empty proper subset as antecedent (consequent = rest).
+    // For pairs this yields exactly A -> B and B -> A.
+    for (let mask = 1; mask < (1 << m) - 1; mask++) {
+      const antecedent = [];
+      const consequent = [];
+      for (let i = 0; i < m; i++) {
+        if (mask & (1 << i)) antecedent.push(items[i]);
+        else consequent.push(items[i]);
+      }
+      if (antecedent.length === 0 || consequent.length === 0) continue;
+      const antEntry = countByKey.get(keyOf(antecedent));
+      if (!antEntry || antEntry.count === 0) continue;
+      const confidenceValue = entry.count / antEntry.count;
+      if (!(confidenceValue >= minConfidence)) continue;
+      const ruleKey = `${keyOf(antecedent)}=>${keyOf(consequent)}`;
+      if (seenRules.has(ruleKey)) continue;
+      seenRules.add(ruleKey);
+      const conEntry = countByKey.get(keyOf(consequent));
+      const rule = {
+        antecedent: [...antecedent],
+        consequent: [...consequent],
+        jointCount: entry.count,
+        antecedentCount: antEntry.count,
+        support: entry.support,
+        confidence: confidenceValue,
+      };
+      if (conEntry) {
+        rule.consequentCount = conEntry.count;
+        if (n > 0 && conEntry.count > 0) {
+          rule.lift = confidenceValue / (conEntry.count / n);
+        }
+      }
+      rules.push(rule);
+    }
+  }
+  return rules;
 }
 
 // ---------------------------------------------------------------------------
